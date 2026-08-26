@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="author" content="我操他媽之 L-M. Wu混世魔王">
+    <meta name="description" content="電位時序分析 - 採用Largest Triangle Three Buckets (LTTB) Downsampling演算法，並使用ECharts繪製圖表。">
+    <title>觀測記錄時序分析</title>
+     <!-- <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script> -->
+	<script src="echarts.min.js"></script>
+     <!-- <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script> -->
+	<script src="papaparse.min.js"></script>
+    <style>
+        #main { width: 100%; height: 500px; }
+        * {
+            color: rgb(0, 0, 0); /* Change this to your desired color */
+        }
+    </style>
+</head>
+<body>
+    <h3>讀取CSV(含本地Excel時間&觀測記錄)檔案進行觀測記錄時序波形分析</h3>
+    <label>Downsampling(points): <input type="number" id="threshold" value="2000" min="100" max="10000"></label>
+    <br>
+    <label>選擇分析組檔案: <input type="file" name="tt1" id="csvFile" accept=".csv"></label>
+    <label>分析組時間欄位選擇: 
+        <select id="timeField"></select>
+    </label>
+    <label>分析組觀測量欄位選擇: 
+        <select id="dataField"></select>
+    </label>
+    <br>
+    <!-- 比對組的CSV與欄位選擇 -->
+    <label>選擇比對組檔案: <input type="file" id="csvFile2" accept=".csv"></label>
+    <label>比對組時間欄位選擇: 
+        <select id="timeField2"></select>
+    </label>
+    <label>比對組觀測量欄位選擇: 
+        <select id="dataFieldLower"></select>
+    </label>
+    <br>
+    <!-- 總周期與OFF電位周期輸入 -->
+    <label>通斷總周期 (秒): <input type="number" id="mainPeriodSec" value="7200" min="1"></label>
+    <label>OFF周期 (秒): <input type="number" id="subPeriodSec" value="3600" min="1"></label>
+    <!-- 總周期偏移量 -->
+    <label>周期偏移量 (百毫秒): <input type="number" id="mainPeriodOffset" value="0" min="0"></label>
+    <br>
+    <fieldset style="margin-top:10px;">
+        <legend>關注時段註記</legend>
+        <div id="markAreaList"></div>
+        <button id="addMarkAreaBtn" type="button">增加註記</button>
+    </fieldset>
+    <br>
+    <button id="plotBtn">展繪&更新</button>    
+    <br>
+    <div id="main"></div>
+    <script src="lttb.js"></script>
+    <script>
+        let rawPoints = [];
+        let headers = [];
+        let rawPoints2 = [];
+        let headers2 = [];
+        let markAreas = [
+            // Default region
+        //    { nameStart: '區塊標示開始', xStart: '2025-01-17T11:12', nameEnd: '', xEnd: '2025-01-17T11:13' }
+        ];
+
+        document.getElementById('csvFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            Papa.parse(file, {
+                header: true,
+                skipEmptyLines: true,
+                worker: true, // 啟用 Web Worker
+                complete: function(results) {
+                    headers = results.meta.fields;
+                    rawPoints = results.data;
+                    alert('分析組讀入: ' + rawPoints.length + ' 筆記錄');
+                    populateDropdowns();
+                }
+            });
+        });
+
+        // 下方比對圖CSV檔案載入
+        document.getElementById('csvFile2').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            Papa.parse(file, {
+                header: true,
+                skipEmptyLines: true,
+                worker: true,
+                complete: function(results) {
+                    headers2 = results.meta.fields;
+                    rawPoints2 = results.data;
+                    alert('比對組讀入: ' + rawPoints2.length + ' 筆記錄');
+                    populateDropdowns2();
+                }
+            });
+        });
+
+        function populateDropdowns() {
+            const timeFieldDropdown = document.getElementById('timeField');
+            const dataFieldDropdown = document.getElementById('dataField');
+            timeFieldDropdown.innerHTML = '';
+            dataFieldDropdown.innerHTML = '';
+            headers.forEach(header => {
+                const timeOption = document.createElement('option');
+                timeOption.value = header;
+                timeOption.textContent = header;
+                timeFieldDropdown.appendChild(timeOption);
+
+                const dataOption = document.createElement('option');
+                dataOption.value = header;
+                dataOption.textContent = header;
+                dataFieldDropdown.appendChild(dataOption);
+            });
+        }
+
+        // 下方比對圖欄位下拉選單
+        function populateDropdowns2() {
+            const timeFieldDropdown2 = document.getElementById('timeField2');
+            const dataFieldLowerDropdown = document.getElementById('dataFieldLower');
+            timeFieldDropdown2.innerHTML = '';
+            dataFieldLowerDropdown.innerHTML = '';
+            headers2.forEach(header => {
+                const timeOption = document.createElement('option');
+                timeOption.value = header;
+                timeOption.textContent = header;
+                timeFieldDropdown2.appendChild(timeOption);
+
+                const dataOption = document.createElement('option');
+                dataOption.value = header;
+                dataOption.textContent = header;
+                dataFieldLowerDropdown.appendChild(dataOption);
+            });
+        }
+
+        // --- MarkArea UI logic ---
+        function renderMarkAreaList() {
+            const listDiv = document.getElementById('markAreaList');
+            listDiv.innerHTML = '';
+            markAreas.forEach((area, idx) => {
+                const div = document.createElement('div');
+                div.style.marginBottom = '4px';
+                div.innerHTML = `
+                    <input type="text" value="${area.nameStart}" size="8" placeholder="註記名稱" data-idx="${idx}" data-field="nameStart">
+                    <input type="text" value="${area.xStart}" size="30" placeholder="起始時間點,範例 2025-05-01T00:00" data-idx="${idx}" data-field="xStart">
+                    <input type="text" value="${area.nameEnd}" size="8" placeholder="可免填" data-idx="${idx}" data-field="nameEnd">
+                    <input type="text" value="${area.xEnd}" size="30" placeholder="結束時間點,範例 2025-05-01T00:30" data-idx="${idx}" data-field="xEnd">
+                    <button type="button" data-idx="${idx}" class="removeMarkAreaBtn">Remove</button>
+                `;
+                listDiv.appendChild(div);
+            });
+            // Add event listeners for input changes and remove buttons
+            listDiv.querySelectorAll('input').forEach(input => {
+                input.onchange = function() {
+                    const idx = +this.dataset.idx;
+                    const field = this.dataset.field;
+                    markAreas[idx][field] = this.value;
+                };
+            });
+            listDiv.querySelectorAll('.removeMarkAreaBtn').forEach(btn => {
+                btn.onclick = function() {
+                    const idx = +this.dataset.idx;
+                    markAreas.splice(idx, 1);
+                    renderMarkAreaList();
+                };
+            });
+        }
+        document.getElementById('addMarkAreaBtn').onclick = function() {
+            markAreas.push({ nameStart: '', xStart: '', nameEnd: '', xEnd: '' });
+            renderMarkAreaList();
+        };
+        renderMarkAreaList();
+        // --- End MarkArea UI logic ---
+
+        document.getElementById('plotBtn').onclick = function() {
+            if (!rawPoints.length) {
+                alert('Please upload a CSV file first.');
+                return;
+            }
+            const timeField = document.getElementById('timeField').value;
+            const dataField = document.getElementById('dataField').value;
+
+            if (!headers.includes(timeField) || !headers.includes(dataField)) {
+                alert('Invalid field selection.');
+                return;
+            }
+
+            const threshold = parseInt(document.getElementById('threshold').value, 10);
+            const points = rawPoints.map(row => ({
+                x: parseFloat(row[timeField]),
+                y: parseFloat(row[dataField])
+            })).filter(pt => !isNaN(pt.x) && !isNaN(pt.y));
+            const downsampled = lttb(points, threshold);
+
+            const data = downsampled.map(pt => [
+                excelDateToJSDate(pt.x), pt.y
+            ]);
+
+            // 下方比對圖
+            const timeField2 = document.getElementById('timeField2').value;
+            const dataFieldLower = document.getElementById('dataFieldLower').value;
+            let dataLower = [];
+            if (rawPoints2.length && headers2.includes(timeField2) && headers2.includes(dataFieldLower)) {
+                const pointsLower = rawPoints2.map(row => ({
+                    x: parseFloat(row[timeField2]),
+                    y: parseFloat(row[dataFieldLower])
+                })).filter(pt => !isNaN(pt.x) && !isNaN(pt.y));
+                const downsampledLower = lttb(pointsLower, threshold);
+                dataLower = downsampledLower.map(pt => [
+                    excelDateToJSDate(pt.x), pt.y
+                ]);
+            }
+
+            // === 輸入的周期秒數並產生背景區塊 ===
+            const mainPeriodSec = parseInt(document.getElementById('mainPeriodSec').value, 10);
+            const subPeriodSec = parseInt(document.getElementById('subPeriodSec').value, 10);
+            // 取得主周期偏移量 (百毫秒單位)
+            const mainPeriodOffset = parseInt(document.getElementById('mainPeriodOffset').value, 10) || 0;
+            if (isNaN(mainPeriodSec) || isNaN(subPeriodSec) || mainPeriodSec <= 0 || subPeriodSec <= 0 || subPeriodSec > mainPeriodSec) {
+                alert('請輸入有效的主周期與次周期秒數，且次周期必須小於等於主周期');
+                return;
+            }
+            const periodMs = mainPeriodSec * 1000;
+            const subPeriodMs = subPeriodSec * 1000;
+            // 將偏移量轉為百毫秒
+            const offsetMs = mainPeriodOffset * 100;
+            // 取得 x 軸範圍（主圖）
+            const xMin = data.length ? data[0][0] : null;
+            const xMax = data.length ? data[data.length - 1][0] : null;
+            let bgMarkAreaData = [];
+            if (xMin && xMax) {
+                let t0 = xMin.getTime();
+                let t = offsetMs;
+                while (t + periodMs <= t0) {
+                    t += periodMs;
+                }
+                while (t < xMax.getTime()) {
+                    // OFF周期: 灰色
+                    let t1Start = t;
+                    let t1End = t + subPeriodMs;
+                    if (t1Start < xMax.getTime()) {
+                        bgMarkAreaData.push([
+                            { xAxis: new Date(t1Start), itemStyle: { color: 'gray' } },
+                            { xAxis: new Date(Math.min(t1End, xMax.getTime())) }
+                        ]);
+                    }
+                    // ON周期: 白色
+                    let t2Start = t1End;
+                    let t2End = t + periodMs;
+                    if (t2Start < xMax.getTime()) {
+                        bgMarkAreaData.push([
+                            { xAxis: new Date(t2Start), itemStyle: { color: 'white' } },
+                            { xAxis: new Date(Math.min(t2End, xMax.getTime())) }
+                        ]);
+                    }
+                    t += periodMs;
+                }
+            }
+
+            // === 下方子圖的周期區塊 ===
+            // 取得 x 軸範圍（下方子圖）
+            const xMinLower = dataLower.length ? dataLower[0][0] : null;
+            const xMaxLower = dataLower.length ? dataLower[dataLower.length - 1][0] : null;
+            let bgMarkAreaDataLower = [];
+            if (xMinLower && xMaxLower) {
+                let t0 = xMinLower.getTime();
+                let t = offsetMs;
+                while (t + periodMs <= t0) {
+                    t += periodMs;
+                }
+                while (t < xMaxLower.getTime()) {
+                    // OFF周期: 灰色
+                    let t1Start = t;
+                    let t1End = t + subPeriodMs;
+                    if (t1Start < xMaxLower.getTime()) {
+                        bgMarkAreaDataLower.push([
+                            { xAxis: new Date(t1Start), itemStyle: { color: 'gray' } },
+                            { xAxis: new Date(Math.min(t1End, xMaxLower.getTime())) }
+                        ]);
+                    }
+                    // ON周期: 白色
+                    let t2Start = t1End;
+                    let t2End = t + periodMs;
+                    if (t2Start < xMaxLower.getTime()) {
+                        bgMarkAreaDataLower.push([
+                            { xAxis: new Date(t2Start), itemStyle: { color: 'white' } },
+                            { xAxis: new Date(Math.min(t2End, xMaxLower.getTime())) }
+                        ]);
+                    }
+                    t += periodMs;
+                }
+            }
+            
+            const chart = echarts.init(document.getElementById('main'));
+            // Prepare markArea data from markAreas array
+            const markAreaData = markAreas
+                .filter(a => a.xStart && a.xEnd)
+                .map(a => [
+                    { name: a.nameStart, xAxis: a.xStart },
+                    { name: a.nameEnd, xAxis: a.xEnd }
+                ]);
+            chart.setOption({
+                grid: [
+                    { top: 60, height: '35%' }, // upper subplot
+                    { top: '58%', height: '35%' } // lower subplot
+                ],
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    formatter: function(params) {
+                        let tooltip = '';
+                        if (params[0] && params[0].data) {
+                            const d = params[0].data[0];
+                            function pad(n) { return n < 10 ? '0' + n : n; }
+                            const year = d.getFullYear();
+                            const month = pad(d.getMonth() + 1);
+                            const day = pad(d.getDate());
+                            const hour = pad(d.getHours());
+                            const min = pad(d.getMinutes());
+                            const sec = pad(d.getSeconds());
+                            const rfc3339 = `${year}-${month}-${day}T${hour}:${min}:${sec}+08:00`; // Asia/Taipei timezone
+                            tooltip += 'Time: ' + rfc3339 + '<br>分析數值: ' + params[0].data[1];
+                        }
+                        if (params.length && params[params.length-1].seriesIndex >= 2 && params[params.length-1].data) {
+                            const d2 = params[params.length-1].data[0];
+                            function pad(n) { return n < 10 ? '0' + n : n; }
+                            const year = d2.getFullYear();
+                            const month = pad(d2.getMonth() + 1);
+                            const day = pad(d2.getDate());
+                            const hour = pad(d2.getHours());
+                            const min = pad(d2.getMinutes());
+                            const sec = pad(d2.getSeconds());
+                            const rfc3339 = `${year}-${month}-${day}T${hour}:${min}:${sec}+08:00`;  // Asia/Taipei timezone
+                            tooltip += `<br><br>Time: ${rfc3339}<br>比對數值: ${params[params.length-1].data[1]}`;
+                        }
+                        return tooltip;
+                    }
+                },
+                xAxis: [
+                    {
+                        type: 'time',
+                        gridIndex: 0,
+                        name: 'Time',
+                        nameLocation: 'middle',
+                        nameTextStyle: { fontSize: 14 },
+                        nameGap: 30
+                    },
+                    {
+                        type: 'time',
+                        gridIndex: 1,
+                        name: 'Time',
+                        nameLocation: 'middle',
+                        nameTextStyle: { fontSize: 14 },
+                        nameGap: 30
+                    }
+                ],
+                yAxis: [
+                    {
+                        type: 'value',
+                        gridIndex: 0,
+                        name: `(${dataField})`,
+                        nameLocation: 'middle',
+                        nameTextStyle: { fontSize: 14 },
+                        nameGap: 50
+                    },
+                    {
+                        type: 'value',
+                        gridIndex: 1,
+                        name: `(${dataFieldLower || 'N/A'})`,
+                        nameLocation: 'middle',
+                        nameTextStyle: { fontSize: 14 },
+                        nameGap: 50
+                    }
+                ],
+                series: [
+                    // 上方主圖背景區塊
+                    {
+                        type: 'line',
+                        data: [],
+                        markArea: {
+                            silent: true,
+                            data: bgMarkAreaData
+                        },
+                        lineStyle: { opacity: 0 },
+                        symbol: 'none',
+                        z: 1,
+                        xAxisIndex: 0,
+                        yAxisIndex: 0
+                    },
+                    // 上方主資料線
+                    {
+                        type: 'line',
+                        data: data,
+                        showSymbol: false,
+                        large: true,
+                        itemStyle: { color: 'red' },
+                        markPoint: {
+                            data: [
+                                { type: 'max', name: 'Max Value', itemStyle: { color: 'green' } },
+                                { type: 'min', name: 'Min Value', itemStyle: { color: 'blue' } }
+                            ]
+                        },
+                        markLine: {
+                            lineStyle: { color: 'brown' },
+                            data: [{ type: 'average', name: 'Average' }]
+                        },
+                        markArea: {
+                            itemStyle: { color: 'rgba(205, 125, 254, 0.39)' },
+                            data: markAreaData
+                        },
+                        xAxisIndex: 0,
+                        yAxisIndex: 0
+                    },
+                    // 下方子圖背景區塊
+                    ...(dataLower.length ? [{
+                        type: 'line',
+                        data: [],
+                        markArea: {
+                            silent: true,
+                            data: bgMarkAreaDataLower
+                        },
+                        lineStyle: { opacity: 0 },
+                        symbol: 'none',
+                        z: 1,
+                        xAxisIndex: 1,
+                        yAxisIndex: 1
+                    }] : []),
+                    // 下方子圖資料線
+                    ...(dataLower.length ? [{
+                        type: 'line',
+                        data: dataLower,
+                        showSymbol: false,
+                        large: true,
+                        itemStyle: { color: 'rgb(1, 225, 255)' },
+                        name: '比對資料',
+                        markPoint: {
+                            data: [
+                                { type: 'max', name: 'Max Value', itemStyle: { color: 'green' } },
+                                { type: 'min', name: 'Min Value', itemStyle: { color: 'blue' } }
+                            ]
+                        },
+                        markLine: {
+                            lineStyle: { color: 'brown' },
+                            data: [{ type: 'average', name: 'Average' }]
+                        },
+                        markArea: {
+                            itemStyle: { color: 'rgba(205, 125, 254, 0.39)' },
+                            data: markAreaData
+                        },
+                        xAxisIndex: 1,
+                        yAxisIndex: 1
+                    }] : [])
+                ],
+                dataZoom: [
+                    // 上方
+                    { type: 'slider', xAxisIndex: [0,1] },
+                    { type: 'slider', yAxisIndex: [0,1] },
+                    { type: 'inside', xAxisIndex: [0,1] },
+                    { type: 'inside', yAxisIndex: [0,1] }
+                ],
+                toolbox: {
+                    feature: {
+                        saveAsImage: {
+                            type: ['png'],
+                            title: '儲存圖片',
+                            name: '分析圖表',                                         
+                        },
+                        restore: {
+                            title: '還原'
+                        },
+                        dataZoom: {
+                            yAxisIndex: 'none',
+                            title: {
+                                zoom: '縮放',
+                                back: '還原'
+                            }   
+                        },
+                        magicType: { type: ['line', 'bar'],
+                            title: {
+                                line: '折線圖',
+                                bar: '長條圖'
+                            }
+                        },
+                        brush: {
+                            type: ['rect', 'polygon', 'lineX', 'lineY', 'keep', 'clear'],
+                            title: {
+                                rect: '框選',
+                                polygon: '多邊形選擇',
+                                lineX: '水平選擇',
+                                lineY: '垂直選擇',
+                                keep: '維持選擇',
+                                clear: '清除選擇'
+                            },                            
+                        },
+                        dataView: { readOnly: true, title: '數據檢視' },
+                        timeline: { title: '時間軸' },
+
+                    }
+                },
+                brush: {
+                    toolbox: ['rect', 'polygon', 'lineX', 'lineY', 'keep', 'clear'],
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    brushStyle: {
+                        color: 'rgba(255, 255, 0, 0.4)' // yellow with some transparency
+                    }
+                }
+            });
+        };
+
+        // Convert Excel serial date (already Asia/Taipei local time) to JS Date
+        function excelDateToJSDate(serial) {
+            // Excel's day 1 is 1900-01-01. Excel incorrectly treats 1900 as a leap year. 但他老媽的就是指鹿為馬
+            let days = Math.floor(serial);
+            if (days >= 60) days -= 1; // Excel leap year bug
+            const ms = (days - 1) * 86400 * 1000; // 1900-01-01 is day 1
+            const fractional_day = serial - Math.floor(serial);
+            const ms_fraction = Math.round(fractional_day * 86400 * 1000);
+            return new Date(1900, 0, 1, 0, 0, 0, 0 + ms + ms_fraction);
+        }
+    </script>
+</body>
+</html>
